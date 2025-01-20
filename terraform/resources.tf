@@ -1,5 +1,3 @@
-
-
 # Создание статического ключа доступа для сервисного аккаунта
 resource "yandex_iam_service_account_static_access_key" "sa_static_key" {
   service_account_id = var.sa_account
@@ -12,12 +10,23 @@ resource "yandex_resourcemanager_folder_iam_member" "adm_function_invoker_iam" {
   member    = "serviceAccount:${var.sa_account}"
 }
 
+
+
 # Создание бакетов для фотографий
 resource "yandex_storage_bucket" "photos_bucket" {
   bucket               = var.photos_bucket
   acl                  = "private"
   default_storage_class = "standard"
   max_size             = 5368709120
+  access_key           = yandex_iam_service_account_static_access_key.sa_static_key.access_key
+  secret_key           = yandex_iam_service_account_static_access_key.sa_static_key.secret_key
+}
+
+# Загрузка объекта в бакет
+resource "yandex_storage_object" "photo_object" {
+  bucket = yandex_storage_bucket.photos_bucket.bucket  
+  key   = "photo.jpg"  
+  source = "/Users/karina/Desktop/VvOT/HW2/terraform/photo.jpg" 
   access_key           = yandex_iam_service_account_static_access_key.sa_static_key.access_key
   secret_key           = yandex_iam_service_account_static_access_key.sa_static_key.secret_key
 }
@@ -61,7 +70,7 @@ resource "yandex_function" "face_detection" {
 
 # Триггер для обнаружения лиц
 resource "yandex_function_trigger" "photo_trigger" {
-  name        = "vvot44-photo-trigger"
+  name        = "vvot44-photo"
   description = "Trigger for photo upload in photos bucket"
   
   function {
@@ -91,7 +100,7 @@ resource "yandex_function" "face_cut" {
 
 # Триггер для задач
 resource "yandex_function_trigger" "task_trigger" {
-  name        = "vvot44-task-trigger"
+  name        = "vvot44-task"
   description = "Trigger for task queue"
 
   function {
@@ -108,7 +117,6 @@ resource "yandex_function_trigger" "task_trigger" {
     batch_size         = "1"  
   }
 }
-
 
 # Создание Telegram бота
 resource "yandex_function" "bot" {
@@ -156,7 +164,6 @@ EOT
 resource "telegram_bot_webhook" "tg_bot_webhook" {
   url = "https://functions.yandexcloud.net/${yandex_function.bot.id}"
 }
-
 
 # Ресурс для создания архива с кодом
 data "archive_file" "bot_source" {
