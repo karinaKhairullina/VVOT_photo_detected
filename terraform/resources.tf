@@ -146,20 +146,27 @@ info:
 paths:
   /:
     get:
-      summary: Serve face images from Yandex Cloud Object Storage
+      summary: "Faces from Yandex Cloud Object Storage"
       parameters:
-        - name: face
-          in: query
+        - name: "face"
+          in: "query"
           required: true
           schema:
-            type: string
+            type: "string"
       x-yc-apigateway-integration:
-        type: object_storage
-        bucket: ${yandex_storage_bucket.faces_bucket.bucket}
+        type: "object-storage"
+        bucket: "${yandex_storage_bucket.photos_bucket.bucket}"
         object: "{face}"
-        service_account_id: ${var.sa_account}
+        service_account_id: "${var.sa_account}"
+      responses:
+        '200':
+          description: "Image found"
+        '404':
+          description: "Image not found"
 EOT
 }
+
+
 
 resource "telegram_bot_webhook" "tg_bot_webhook" {
   url = "https://functions.yandexcloud.net/${yandex_function.bot.id}"
