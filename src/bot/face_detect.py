@@ -40,13 +40,13 @@ def lambda_handler(event, context):
             # Загружаем фото с S3
             image = download_image_from_s3(bucket, key)
             if image is None:
-                print(f"!!! ОШИБКА: Не удалось загрузить изображение: {key}")
+                print(f" Не удалось загрузить изображение: {key}")
                 continue
 
             # Используем OpenCV для обнаружения лиц
             faces = detect_faces(image)
             if not faces:
-                print(f"!!! ВНИМАНИЕ: Лица не обнаружены на изображении: {key}")
+                print(f"Лица не обнаружены на изображении: {key}")
                 continue
 
             print(f"Обнаружено {len(faces)} лиц на изображении: {key}")  # Логируем количество лиц
@@ -60,7 +60,6 @@ def lambda_handler(event, context):
         except Exception as e:
             print(f"!!! ОШИБКА при обработке записи: {e}")
 
-    print("=== ЗАВЕРШЕНИЕ ОБРАБОТКИ СОБЫТИЯ ===")
     return {"statusCode": 200, "body": "OK"}
 
 
@@ -72,12 +71,12 @@ def download_image_from_s3(bucket, key):
         image_data = np.frombuffer(response['Body'].read(), np.uint8)
         image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
         if image is None:
-            print(f"!!! ОШИБКА: Не удалось декодировать изображение: {key}")
+            print(f"Не удалось декодировать изображение: {key}")
         else:
             print(f"Изображение успешно загружено: {key}")
         return image
     except Exception as e:
-        print(f"!!! ОШИБКА при загрузке изображения из S3: {e}")
+        print(f"!!! ОШИБКА при загрузке изображения: {e}")
         return None
 
 
@@ -87,7 +86,6 @@ def detect_faces(image):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
         if not os.path.exists(cascade_path):
-            print(f"!!! ОШИБКА: Файл каскада Хаара не найден: {cascade_path}")
             return []
         print(f"Используется файл каскада Хаара: {cascade_path}")
         face_cascade = cv2.CascadeClassifier(cascade_path)
@@ -105,7 +103,6 @@ def send_task_to_queue(key, face):
         'face_coordinates': face
     }
     try:
-        print(f"=== ОТПРАВКА ЗАДАЧИ В ОЧЕРЕДЬ ===")
         print(f"Подготовленное сообщение для отправки: {message}")
         sqs.send_message(
             QueueUrl=QUEUE_URL,
@@ -113,4 +110,4 @@ def send_task_to_queue(key, face):
         )
         print(f"Задача успешно отправлена в очередь: {message}")
     except Exception as e:
-        print(f"!!! ОШИБКА при отправке сообщения в SQS: {e}")
+        print(f"!!! ОШИБКА при отправке сообщения: {e}")
