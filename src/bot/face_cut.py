@@ -1,42 +1,89 @@
+import boto3
+from PIL import Image
+import io
 import json
-import os
-import cv2
-import numpy as np
-from yandex.cloud import storage
+import random
+import string
 
-def handler(event, context):
-    task = event
-    image_key = task["image_key"]
-    face_coordinates = task["face_coordinates"]
-    access_key = os.environ['ACCESS_KEY']
-    secret_key = os.environ['SECRET_KEY']
+s3 = boto3.client('s3', endpoint_url='https://storage.yandexcloud.net')
+sqs = boto3.client('sqs', endpoint_url='https://message-queue.api.cloud.yandex.net')
 
-    # Инициализация клиента Yandex Storage
-    storage_client = storage.Client(access_key=access_key, secret_key=secret_key)
+QUEUE_URL = 'https://message-queue.api.cloud.yandex.net/b1gk0l897h6p4jnm5nmo/aoek3m6f3s8e8u7jv64a/vvot44-task'
+INPUT_BUCKET = 'vvot44-photo'
+OUTPUT_BUCKET = 'vvot44-faces'
 
-    # Скачиваем оригинальное изображение
-    bucket_name = "vvot44-photos"
-    object_data = storage_client.get_object(bucket_name, image_key)
-    image_bytes = object_data.read()
 
-    # Обработка изображения
-    np_image = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-    x, y, w, h = face_coordinates["x"], face_coordinates["y"], face_coordinates["width"], face_coordinates["height"]
-    face = image[y:y+h, x:x+w]
+def lambda_handler(event, context):
+    print("Получено событие:", json.dumps(event))  # Логируем входящее событие
+    messages = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=10)
 
-    # Сохранение лица
-    bucket_name_faces = "vvot44-faces"
-    face_file_name = f"face_{image_key.split('.')[0]}_{x}_{y}.jpg"
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
-    _, encoded_face = cv2.imencode('.jpg', face, encode_param)
-    storage_client.put_object(bucket_name_faces, face_file_name, encoded_face.tobytes())
+    if 'Messages' not in messages:
+        print("Очередь пуста. Нет задач для обработки.")
+        return {"statusCode": 200, "body": "OK"}
 
-    # Сохранение метаданных
-    save_metadata(image_key, face_file_name)
+    for message in messages['Messages']:
+        receipt_handle = message['ReceiptHandle']
+        body = json.loads(message['Body'])
+        file_name = body['file_name']
+        face_coordinates = body['face_coordinates']
 
-    return json.dumps({"message": "Face cut and saved."})
+        print(f"Обработка задачи: файл {file_name}, координаты лица: {face_coordinates}")  # Логируем задачу
 
-def save_metadata(original_image_key, face_image_key):
-    # Сохранение метаданных в базу данных
-    pass
+        # Загружаем изображение с S3
+        image = download_image_from_s3(file_name)
+        if image is None:
+            print(f"Ошибка загрузки изображения: {file_name}")
+            continue
+
+        # Обрезаем лицо
+        x, y, w, h = face_coordinates
+        face_image = crop_face(image, x, y, w, h)
+        if face_image is None:
+            print(f"Ошибка обрезки лица: {file_name}")
+            continue
+
+        # Генерируем случайное имя для нового файла
+        new_file_name = generate_random_key() + '.jpg'
+        print(f"Сохранение обрезанного лица: {new_file_name}")  # Логируем сохранение
+
+        # Сохраняем обрезанное лицо в бакет
+        save_face_to_s3(face_image, new_file_name)
+
+        # Удаляем сообщение из очереди
+        sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt_handle)
+        print(f"Задача завершена и удалена из очереди: {file_name}")
+
+    return {"statusCode": 200, "body": "OK"}
+
+
+def download_image_from_s3(key):
+    try:
+        response = s3.get_object(Bucket=INPUT_BUCKET, Key=key)
+        image_data = response['Body'].read()
+        return Image.open(io.BytesIO(image_data))
+    except Exception as e:
+        print(f"Ошибка загрузки изображения из S3: {e}")
+        return None
+
+
+def crop_face(image, x, y, w, h):
+    try:
+        return image.crop((x, y, x + w, y + h))
+    except Exception as e:
+        print(f"Ошибка обрезки лица: {e}")
+        return None
+
+
+def generate_random_key():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+
+
+def save_face_to_s3(image, file_name):
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG")
+    buffer.seek(0)
+    try:
+        s3.put_object(Bucket=OUTPUT_BUCKET, Key=file_name, Body=buffer.getvalue(), ContentType='image/jpeg')
+        print(f"Изображение успешно сохранено в бакет: {file_name}")  # Логируем успешное сохранение
+    except Exception as e:
+        print(f"Ошибка сохранения изображения в S3: {e}")

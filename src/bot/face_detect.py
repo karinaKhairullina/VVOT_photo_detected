@@ -1,43 +1,116 @@
-import json
-import os
+import boto3
 import cv2
 import numpy as np
-from yandex.cloud import storage
+import json
+import os
+import random
 
-def handler(event, context):
-    """Обработка задачи обнаружения лиц"""
-    task = event
-    image_key = task["image_key"]
-    face_coordinates = task["face_coordinates"]
-    access_key = os.environ['ACCESS_KEY']
-    secret_key = os.environ['SECRET_KEY']
+# Создание клиентов через boto3.session.Session
+session = boto3.session.Session()
+s3 = session.client(
+    service_name='s3',
+    endpoint_url='https://storage.yandexcloud.net',
+    region_name='ru-central1'
+)
+sqs = session.client(
+    service_name='sqs',
+    endpoint_url='https://message-queue.api.cloud.yandex.net',
+    region_name='ru-central1'
+)
 
-    # Инициализация клиента Yandex Storage
-    storage_client = storage.Client(access_key=access_key, secret_key=secret_key)
+QUEUE_URL = 'https://message-queue.api.cloud.yandex.net/b1gk0l897h6p4jnm5nmo/aoek3m6f3s8e8u7jv64a/vvot44-task'
 
-    # Скачиваем оригинальное изображение из бакета
-    bucket_name = "vvot44-photos"
-    object_data = storage_client.get_object(bucket_name, image_key)
-    image_bytes = object_data.read()
 
-    # Обработка изображения
-    np_image = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-    x, y, w, h = face_coordinates["x"], face_coordinates["y"], face_coordinates["width"], face_coordinates["height"]
-    face = image[y:y+h, x:x+w]
+def lambda_handler(event, context):
+    print("=== НАЧАЛО ОБРАБОТКИ СОБЫТИЯ ===")
+    print(f"Получено событие: {json.dumps(event)}")  # Логируем входящее событие
 
-    # Сохранение лица в другой бакет
-    bucket_name_faces = "vvot44-faces"
-    face_file_name = f"face_{image_key.split('.')[0]}_{x}_{y}.jpg"
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
-    _, encoded_face = cv2.imencode('.jpg', face, encode_param)
-    storage_client.put_object(bucket_name_faces, face_file_name, encoded_face.tobytes())
+    # Проверяем, что событие содержит записи
+    if 'Records' not in event or len(event['Records']) == 0:
+        print("!!! ОШИБКА: Событие не содержит записей.")
+        return {"statusCode": 400, "body": "Bad Request: No records found in event"}
 
-    # Сохранение метаданных (например, в базу данных)
-    save_metadata(image_key, face_file_name)
+    for record in event['Records']:
+        try:
+            print(f"=== ОБРАБОТКА ЗАПИСИ ===")
+            bucket = record['s3']['bucket']['name']
+            key = record['s3']['object']['key']
+            print(f"Обработка файла: {key} из бакета: {bucket}")  # Логируем имя файла
 
-    return json.dumps({"message": "Face cut and saved."})
+            # Загружаем фото с S3
+            image = download_image_from_s3(bucket, key)
+            if image is None:
+                print(f"!!! ОШИБКА: Не удалось загрузить изображение: {key}")
+                continue
 
-def save_metadata(original_image_key, face_image_key):
-    """Сохранение метаданных в базу данных"""
-    pass
+            # Используем OpenCV для обнаружения лиц
+            faces = detect_faces(image)
+            if not faces:
+                print(f"!!! ВНИМАНИЕ: Лица не обнаружены на изображении: {key}")
+                continue
+
+            print(f"Обнаружено {len(faces)} лиц на изображении: {key}")  # Логируем количество лиц
+            for face in faces:
+                print(f"Координаты лица: {face.tolist()}")  # Логируем координаты каждого лица
+
+            # Отправляем задачи в очередь
+            for face in faces:
+                send_task_to_queue(key, face.tolist())
+
+        except Exception as e:
+            print(f"!!! ОШИБКА при обработке записи: {e}")
+
+    print("=== ЗАВЕРШЕНИЕ ОБРАБОТКИ СОБЫТИЯ ===")
+    return {"statusCode": 200, "body": "OK"}
+
+
+def download_image_from_s3(bucket, key):
+    try:
+        print(f"=== ЗАГРУЗКА ИЗОБРАЖЕНИЯ ===")
+        print(f"Попытка загрузить изображение: {key} из бакета: {bucket}")
+        response = s3.get_object(Bucket=bucket, Key=key)
+        image_data = np.frombuffer(response['Body'].read(), np.uint8)
+        image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        if image is None:
+            print(f"!!! ОШИБКА: Не удалось декодировать изображение: {key}")
+        else:
+            print(f"Изображение успешно загружено: {key}")
+        return image
+    except Exception as e:
+        print(f"!!! ОШИБКА при загрузке изображения из S3: {e}")
+        return None
+
+
+def detect_faces(image):
+    try:
+        print(f"=== ОБНАРУЖЕНИЕ ЛИЦ ===")
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
+        if not os.path.exists(cascade_path):
+            print(f"!!! ОШИБКА: Файл каскада Хаара не найден: {cascade_path}")
+            return []
+        print(f"Используется файл каскада Хаара: {cascade_path}")
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        print(f"Обнаружено {len(faces)} лиц.")
+        return faces
+    except Exception as e:
+        print(f"!!! ОШИБКА при обнаружении лиц: {e}")
+        return []
+
+
+def send_task_to_queue(key, face):
+    message = {
+        'file_name': key,
+        'face_coordinates': face
+    }
+    try:
+        print(f"=== ОТПРАВКА ЗАДАЧИ В ОЧЕРЕДЬ ===")
+        print(f"Подготовленное сообщение для отправки: {message}")
+        sqs.send_message(
+            QueueUrl=QUEUE_URL,
+            MessageBody=json.dumps(message)
+        )
+        print(f"Задача успешно отправлена в очередь: {message}")
+    except Exception as e:
+        print(f"!!! ОШИБКА при отправке сообщения в SQS: {e}")
