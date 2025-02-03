@@ -30,6 +30,11 @@ variable "queue_name" {
   type        = string
 }
 
+variable "queue_url" {
+  description = "URL очереди"
+  type        = string
+}
+
 variable "bot_function" {
   description = "Название функции для Telegram бота"
   type        = string
@@ -83,8 +88,8 @@ variable "secret_key" {
 }
 
 
+
 variable "key_file_path" {
   type        = string
   description = "Ключ сервисного аккаунта"
-  default     = "/Users/karina/Desktop/VvOT/HW2/terraform/key.json"
 }

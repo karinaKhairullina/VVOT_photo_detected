@@ -1,4 +1,3 @@
-# Создание статического ключа доступа для сервисного аккаунта
 resource "yandex_iam_service_account_static_access_key" "sa_static_key" {
   service_account_id = var.sa_account
 }
@@ -11,8 +10,7 @@ resource "yandex_resourcemanager_folder_iam_member" "adm_function_invoker_iam" {
 }
 
 
-
-# Создание бакетов для фотографий
+# Создание бакета для фотографий
 resource "yandex_storage_bucket" "photos_bucket" {
   bucket               = var.photos_bucket
   acl                  = "private"
@@ -31,7 +29,7 @@ resource "yandex_storage_object" "photo_object" {
   secret_key           = yandex_iam_service_account_static_access_key.sa_static_key.secret_key
 }
 
-# Создание бакетов для лиц
+# Создание бакета для лиц
 resource "yandex_storage_bucket" "faces_bucket" {
   bucket               = var.faces_bucket
   acl                  = "private"
@@ -41,12 +39,7 @@ resource "yandex_storage_bucket" "faces_bucket" {
   secret_key           = yandex_iam_service_account_static_access_key.sa_static_key.secret_key
 }
 
-# Очередь сообщений для задач
-resource "yandex_message_queue" "tasks_queue" {
-  name        = var.queue_name
-  access_key  = yandex_iam_service_account_static_access_key.sa_static_key.access_key
-  secret_key  = yandex_iam_service_account_static_access_key.sa_static_key.secret_key 
-}
+
 
 # Создание Yandex Database (serverless)
 resource "yandex_ydb_database_serverless" "database" {
@@ -58,13 +51,19 @@ resource "yandex_ydb_database_serverless" "database" {
 # Создание функции для обнаружения лиц
 resource "yandex_function" "face_detection" {
   name               = "vvot44-face-detection"
-  entrypoint         = "index.handler"
-  memory             = "256"
+  entrypoint         = "face_detect.py"
+  memory             = "512"
   runtime            = "python312"
   service_account_id = var.sa_account
   user_hash          = "face-detection-user" 
   content {
     zip_filename = data.archive_file.bot_source.output_path
+  }
+  environment = {
+    ACCESS_KEY      = var.access_key
+    SECRET_KEY      = var.secret_key
+    PHOTOS_BUCKET   = yandex_storage_bucket.photos_bucket.bucket
+    TASK_QUEUE_URL  = yandex_message_queue.tasks_queue.arn
   }
 }
 
@@ -88,7 +87,7 @@ resource "yandex_function_trigger" "photo_trigger" {
 # Создание обработчика для нарезки лиц
 resource "yandex_function" "face_cut" {
   name               = "vvot44-face-cut"
-  entrypoint         = "index.handler"
+  entrypoint         = "face_cut.py"
   memory             = "256"
   runtime            = "python312"
   service_account_id = var.sa_account
@@ -96,12 +95,16 @@ resource "yandex_function" "face_cut" {
   content {
     zip_filename = data.archive_file.bot_source.output_path
   }
+  environment = {
+    ACCESS_KEY    = var.access_key
+    SECRET_KEY    = var.secret_key
+    FACES_BUCKET  = yandex_storage_bucket.faces_bucket.bucket
+  }
 }
 
 # Триггер для задач
 resource "yandex_function_trigger" "task_trigger" {
   name        = "vvot44-task"
-  description = "Trigger for task queue"
 
   function {
     id                 = yandex_function.face_cut.id
@@ -118,7 +121,7 @@ resource "yandex_function_trigger" "task_trigger" {
   }
 }
 
-# Создание Telegram бота
+# Создание бота
 resource "yandex_function" "bot" {
   name               = "vvot44-bot"
   entrypoint         = "index.handler"
@@ -129,24 +132,29 @@ resource "yandex_function" "bot" {
   environment = {
     TELEGRAM_BOT_TOKEN = var.tg_bot_key
     API_GATEWAY_URL    = "https://${yandex_api_gateway.api_gw.domain}"
+    ACCESS_KEY         = var.access_key
+    SECRET_KEY         = var.secret_key
+    QUEUE_URL          = var.queue_url
+    FACES_BUCKET       = var.faces_bucket
+    PHOTOS_BUCKET=var.photos_bucket
   }
   content {
     zip_filename = data.archive_file.bot_source.output_path
   }
 }
 
-# Настройка API Gateway для работы с фотографиями лиц
+# Настройка API Gateway 
 resource "yandex_api_gateway" "api_gw" {
   name = "vvot44-apigw"
-  spec = <<-EOT
+  spec = <<EOT
 openapi: "3.0.0"
 info:
   version: 1.0.0
-  title: Photo Face Detector API
+  title: Faces API
 paths:
   /:
     get:
-      summary: "Faces from Yandex Cloud Object Storage"
+      summary: "Get face"
       parameters:
         - name: "face"
           in: "query"
@@ -155,7 +163,7 @@ paths:
             type: "string"
       x-yc-apigateway-integration:
         type: "object-storage"
-        bucket: "${yandex_storage_bucket.photos_bucket.bucket}"
+        bucket: "${yandex_storage_bucket.faces_bucket.bucket}"
         object: "{face}"
         service_account_id: "${var.sa_account}"
       responses:
@@ -166,6 +174,12 @@ paths:
 EOT
 }
 
+# Очередь сообщений для задач
+resource "yandex_message_queue" "tasks_queue" {
+  name        = var.queue_name
+  access_key  = yandex_iam_service_account_static_access_key.sa_static_key.access_key
+  secret_key  = yandex_iam_service_account_static_access_key.sa_static_key.secret_key 
+}
 
 
 resource "telegram_bot_webhook" "tg_bot_webhook" {
@@ -176,5 +190,5 @@ resource "telegram_bot_webhook" "tg_bot_webhook" {
 data "archive_file" "bot_source" {
   type        = "zip"
   source_dir  = "../src/bot"
-  output_path = "../build/bot.zip"
+  output_path = "../build/new_bot.zip"
 }
